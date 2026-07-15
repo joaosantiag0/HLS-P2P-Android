@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">P2PPlayer</string>
+    <string name="hint_stream_url">URL do stream HLS (.m3u8)</string>
+    <string name="hint_user_agent">User-Agent</string>
+    <string name="hint_server_url">URL do servidor P2PPlayer</string>
+    <string name="btn_play">Reproduzir</string>
+    <string name="default_user_agent">VLC/3.0.20 LibVLC/3.0.20</string>
+    <string name="stats_format">HTTP ↓ %1$s  tot %2$s  ·  HTTP ↑ %3$s  tot %4$s\nP2P ↓ %5$s  tot %6$s  ·  P2P ↑ %7$s  tot %8$s\npeers %9$d  dc %10$d</string>
+    <string name="error_play">Falha ao iniciar: %1$s</string>
+</resources>

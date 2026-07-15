@@ -1,0 +1,53 @@
+services:
+  server:
+    build:
+      context: ../server
+      dockerfile: ../deploy/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      LISTEN_ADDR: ":8080"
+      CACHE_DIR: /app/data/cache
+      CACHE_MAX_BYTES: "2147483648"
+      SESSION_TTL: "2h"
+      ALLOW_PRIVATE_NET: "false"
+      ACCESS_SECRET: "${ACCESS_SECRET:-}"
+      STUN_URLS: "${STUN_URLS:-stun:stun.l.google.com:19302}"
+      TURN_URL: "${TURN_URL:-}"
+      TURN_USER: "${TURN_USER:-}"
+      TURN_PASS: "${TURN_PASS:-}"
+      MAX_SEGMENT_BYTES: "33554432"
+      ORIGIN_TIMEOUT: "15s"
+    volumes:
+      - p2p-cache:/app/data/cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # Opcional: docker compose --profile turn up
+  coturn:
+    image: coturn/coturn:4.6
+    profiles: ["turn"]
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+    environment:
+      DETECT_EXTERNAL_IP: "yes"
+    command:
+      - "-n"
+      - "--log-file=stdout"
+      - "--listening-port=3478"
+      - "--fingerprint"
+      - "--lt-cred-mech"
+      - "--user=${TURN_USER:-p2p}:${TURN_PASS:-p2psecret}"
+      - "--realm=p2pplayer.local"
+      - "--no-cli"
+      - "--no-tls"
+      - "--no-dtls"
+      - "--external-ip=${TURN_EXTERNAL_IP:-}"
+
+volumes:
+  p2p-cache:

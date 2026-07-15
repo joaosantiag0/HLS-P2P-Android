@@ -1,0 +1,44 @@
+# OS / IDE
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+*.swp
+*~
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+deploy/.env
+
+# Server (Go)
+server/bin/
+server/data/
+server/*.exe
+server/coverage.out
+server/*.test
+
+
+# Android
+Android/local.properties
+Android/.gradle/
+Android/**/build/
+Android/**/captures/
+Android/.cxx/
+Android/.externalNativeBuild/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.iml
+
+# Kotlin / Java
+*.class
+*.jar
+!**/gradle-wrapper.jar
+
+# Misc
+*.tmp
+*.bak

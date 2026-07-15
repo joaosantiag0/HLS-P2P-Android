@@ -12,10 +12,12 @@ services:
       SESSION_TTL: "2h"
       ALLOW_PRIVATE_NET: "false"
       ACCESS_SECRET: "${ACCESS_SECRET:-}"
-      STUN_URLS: "${STUN_URLS:-stun:stun.l.google.com:19302}"
-      TURN_URL: "${TURN_URL:-}"
-      TURN_USER: "${TURN_USER:-}"
-      TURN_PASS: "${TURN_PASS:-}"
+      # TURN público (Open Relay). Opcional: METERED_API_KEY para credenciais da conta free.
+      STUN_URLS: "${STUN_URLS:-stun:stun.l.google.com:19302,stun:stun.relay.metered.ca:80}"
+      TURN_URL: "${TURN_URL:-turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:80?transport=tcp,turn:openrelay.metered.ca:443,turn:openrelay.metered.ca:443?transport=tcp}"
+      TURN_USER: "${TURN_USER:-openrelayproject}"
+      TURN_PASS: "${TURN_PASS:-openrelayproject}"
+      METERED_API_KEY: "${METERED_API_KEY:-}"
       MAX_SEGMENT_BYTES: "33554432"
       ORIGIN_TIMEOUT: "15s"
     volumes:
@@ -27,19 +29,21 @@ services:
       timeout: 3s
       retries: 3
 
-  # Opcional: docker compose --profile turn up
+  # TURN local opcional (se preferir não usar o público):
+  # docker compose --profile turn up -d
   coturn:
-    image: coturn/coturn:4.6
     profiles: ["turn"]
+    image: coturn/coturn:4.6
     ports:
       - "3478:3478"
       - "3478:3478/udp"
-    environment:
-      DETECT_EXTERNAL_IP: "yes"
+      - "49152-49200:49152-49200/udp"
     command:
       - "-n"
       - "--log-file=stdout"
       - "--listening-port=3478"
+      - "--min-port=49152"
+      - "--max-port=49200"
       - "--fingerprint"
       - "--lt-cred-mech"
       - "--user=${TURN_USER:-p2p}:${TURN_PASS:-p2psecret}"
@@ -48,6 +52,7 @@ services:
       - "--no-tls"
       - "--no-dtls"
       - "--external-ip=${TURN_EXTERNAL_IP:-}"
+    restart: unless-stopped
 
 volumes:
   p2p-cache:

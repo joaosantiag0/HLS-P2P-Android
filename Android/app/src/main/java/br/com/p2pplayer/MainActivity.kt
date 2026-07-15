@@ -94,6 +94,7 @@ class MainActivity : AppCompatActivity() {
         loading = findViewById(R.id.loading)
 
         inputServer.setText(BuildConfig.DEFAULT_SERVER_URL)
+        inputUrl.setText(getString(R.string.default_stream_url))
         inputUserAgent.setText(getString(R.string.default_user_agent))
 
         segmentStore = SegmentStore(File(cacheDir, "segments"))

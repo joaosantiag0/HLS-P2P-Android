@@ -40,6 +40,9 @@ class PeerMesh(
     private val listeners = CopyOnWriteArrayList<(String) -> Unit>()
     private val signaledPeerIds = ConcurrentHashMap.newKeySet<String>()
     private val inventoryLock = Object()
+    @Volatile private var lastFullAnnounceAt = 0L
+    private val prefetchExecutor = Executors.newFixedThreadPool(3)
+    private val iceRetries = ConcurrentHashMap<String, Int>()
 
     private val factory: PeerConnectionFactory = WebRtcFactory.get(context)
 
@@ -58,6 +61,32 @@ class PeerMesh(
     fun hasSignaledPeers(): Boolean = signaledPeerIds.isNotEmpty()
 
     fun peerHasPublic(segmentId: String): Boolean = peerHas(segmentId)
+
+    /**
+     * Seeder por segmento: espalha HTTP no swarm para maximizar P2P bidirecional.
+     * Com 2 peers, cada um HTTP-seeda ~50% dos segmentos e baixa o resto via P2P.
+     */
+    fun isSegmentSeeder(segmentId: String): Boolean {
+        val swarm = swarmPeerIds()
+        if (swarm.size <= 1) return true
+        val sorted = swarm.sorted()
+        val idx = segmentOwnerIndex(segmentId, sorted.size)
+        return sorted[idx] == localPeerId
+    }
+
+    private fun swarmPeerIds(): Set<String> {
+        val others = if (signaledPeerIds.isNotEmpty()) signaledPeerIds else remoteInventory.keys
+        return others + localPeerId
+    }
+
+    private fun segmentOwnerIndex(segmentId: String, n: Int): Int {
+        if (n <= 1 || segmentId.isEmpty()) return 0
+        var h = 0
+        for (c in segmentId) {
+            h = (h * 31 + c.code) and 0x7fffffff
+        }
+        return h % n
+    }
 
     fun awaitPeerSegment(segmentId: String, timeoutMs: Long) {
         if (peerHas(segmentId) || store.has(segmentId)) return
@@ -78,9 +107,24 @@ class PeerMesh(
     private fun peerHas(segmentId: String): Boolean =
         remoteInventory.values.any { it.contains(segmentId) }
 
+    /** Anúncio rápido de 1 segmento (crítico no live para o leecher não cair no HTTP). */
+    fun announceHave(segmentId: String) {
+        if (segmentId.isEmpty()) return
+        signaling.sendInventory(listOf(segmentId))
+        val msg = JSONObject().put("t", "have").put("ids", JSONArray().put(segmentId))
+        peers.values.forEach { sendJson(it, msg) }
+        // Full inventory debounced — evita flood no WS
+        val now = System.currentTimeMillis()
+        if (now - lastFullAnnounceAt >= 5_000L) {
+            lastFullAnnounceAt = now
+            announceInventory()
+        }
+    }
+
     fun announceInventory() {
         val ids = store.recentIds(40)
         if (ids.isEmpty() && signaledPeerIds.isEmpty()) return
+        lastFullAnnounceAt = System.currentTimeMillis()
         signaling.sendInventory(ids)
         val arr = JSONArray()
         ids.forEach { arr.put(it) }
@@ -91,54 +135,53 @@ class PeerMesh(
     }
 
     /**
-     * Try to fetch segment from a peer that has it. Returns null on timeout/failure.
-     * segmentId = hash da URL de origem (não hash do conteúdo).
+     * Fetch segment via WebRTC DataChannel only (P2P real). Sem relay no servidor.
      */
     fun requestSegment(segmentId: String, timeoutMs: Long = 2500): ByteArray? {
         if (store.has(segmentId)) return store.get(segmentId)
 
-        // 1) DataChannel direto
+        awaitOpenChannel(1_200)
+
         val dcPeer = peers.entries.firstOrNull { (peerId, slot) ->
-            remoteInventory[peerId]?.contains(segmentId) == true &&
-                slot.channel?.state() == DataChannel.State.OPEN
+            slot.channel?.state() == DataChannel.State.OPEN &&
+                remoteInventory[peerId]?.contains(segmentId) == true
         }
-        if (dcPeer != null) {
-            val pendingDownload = PendingDownload()
-            pending[segmentId] = pendingDownload
-            try {
-                sendJson(dcPeer.value, JSONObject().put("t", "want").put("id", segmentId).put("offset", 0))
-                if (pendingDownload.waitDone(timeoutMs)) {
-                    val data = pendingDownload.data
-                    if (data != null && data.isNotEmpty()) {
-                        store.putKeyed(segmentId, data)
-                        return data
-                    }
-                }
-            } finally {
-                pending.remove(segmentId)
-            }
+        if (dcPeer == null) {
+            Log.d(tag, "P2P miss (sem DC com segmento) id=${segmentId.take(8)}")
+            return null
         }
 
-        // 2) Relay via WebSocket (tracker) — funciona na LAN mesmo se WebRTC falhar
-        val relayPeer = remoteInventory.entries.firstOrNull { it.value.contains(segmentId) }?.key
-            ?: return null
-        Log.d(tag, "relay want $segmentId -> ${relayPeer.take(8)}")
         val pendingDownload = PendingDownload()
         pending[segmentId] = pendingDownload
         try {
-            signaling.sendRelayWant(relayPeer, segmentId)
-            if (!pendingDownload.waitDone(timeoutMs + 800)) {
-                Log.d(tag, "relay timeout $segmentId")
+            sendJson(dcPeer.value, JSONObject().put("t", "want").put("id", segmentId).put("offset", 0))
+            if (!pendingDownload.waitDone(timeoutMs)) {
+                Log.d(tag, "DC timeout $segmentId")
                 return null
             }
-            val data = pendingDownload.data ?: return null
-            if (data.isEmpty()) return null
+            val data = pendingDownload.data
+            if (data == null || data.isEmpty()) return null
             store.putKeyed(segmentId, data)
-            Log.d(tag, "relay OK $segmentId size=${data.size}")
+            Log.d(tag, "DC OK $segmentId size=${data.size}")
             listeners.forEach { it(segmentId) }
             return data
         } finally {
             pending.remove(segmentId)
+        }
+    }
+
+    fun hasOpenDataChannel(): Boolean =
+        peers.values.any { it.channel?.state() == DataChannel.State.OPEN }
+
+    private fun awaitOpenChannel(timeoutMs: Long) {
+        if (hasOpenDataChannel()) return
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!hasOpenDataChannel() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(50)
+            } catch (_: InterruptedException) {
+                return
+            }
         }
     }
 
@@ -149,6 +192,7 @@ class PeerMesh(
             signaling.close()
         }
         executor.shutdown()
+        prefetchExecutor.shutdownNow()
     }
 
     override fun onPeers(peerIds: List<String>) {
@@ -193,49 +237,49 @@ class PeerMesh(
     }
 
     override fun onInventory(from: String, segmentIds: List<String>) {
-        remoteInventory.getOrPut(from) { ConcurrentHashMap.newKeySet() }.addAll(segmentIds)
-        Log.d(tag, "inventory from $from: ${segmentIds.size} segs")
+        val set = remoteInventory.getOrPut(from) { ConcurrentHashMap.newKeySet() }
+        // Lista grande = snapshot completo (substitui). Lista curta = delta "have".
+        if (segmentIds.size >= 10) {
+            set.clear()
+        }
+        set.addAll(segmentIds)
+        // Evita crescer sem limite se só chegarem deltas
+        if (set.size > 200 && segmentIds.isNotEmpty()) {
+            set.clear()
+            set.addAll(segmentIds)
+        }
+        Log.d(tag, "inventory from ${from.take(8)}: +${segmentIds.size} total=${set.size}")
         synchronized(inventoryLock) { inventoryLock.notifyAll() }
         refreshPeerCount()
-    }
-
-    override fun onRelayWant(from: String, segmentId: String) {
-        signaling.sendRelayResponse {
-            val data = store.get(segmentId)
-            if (data == null) {
-                signaling.sendRelayNack(from, segmentId, "missing")
-                return@sendRelayResponse
+        // Prefetch em deltas "have": quem não é seeder daquele segmento baixa via P2P.
+        if (segmentIds.size in 1..3) {
+            for (id in segmentIds) {
+                if (store.has(id) || pending.containsKey(id)) continue
+                if (isSegmentSeeder(id)) continue
+                prefetchExecutor.execute {
+                    try {
+                        val data = requestSegment(id, timeoutMs = 8_000)
+                        if (data != null) {
+                            Log.d(tag, "prefetch OK ${id.take(8)} size=${data.size}")
+                            synchronized(inventoryLock) { inventoryLock.notifyAll() }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(tag, "prefetch fail ${id.take(8)}: ${e.message}")
+                    }
+                }
             }
-            Log.d(tag, "relay serve ${segmentId.take(8)} size=${data.size} -> ${from.take(8)}")
-            // Chunks menores = mensagens WS mais leves
-            val chunkSize = 8 * 1024
-            var offset = 0
-            while (offset < data.size) {
-                val end = (offset + chunkSize).coerceAtMost(data.size)
-                val part = data.copyOfRange(offset, end)
-                val b64 = Base64.encodeToString(part, Base64.NO_WRAP)
-                trafficStats.addP2pUp(part.size.toLong())
-                signaling.sendRelayChunk(from, segmentId, offset, data.size, b64)
-                offset = end
-            }
-            signaling.sendRelayDone(from, segmentId)
-            Log.d(tag, "relay serve done ${segmentId.take(8)}")
         }
     }
 
-    override fun onRelayChunk(from: String, segmentId: String, offset: Int, total: Int, dataB64: String) {
-        val part = Base64.decode(dataB64, Base64.NO_WRAP)
-        trafficStats.addP2pDown(part.size.toLong())
-        pending[segmentId]?.accept(offset, total, part)
+    override fun onRelayWant(from: String, segmentId: String) {
+        // Relay WS desativado — segmentos só via DataChannel.
     }
 
-    override fun onRelayDone(from: String, segmentId: String) {
-        pending[segmentId]?.markDone()
-    }
+    override fun onRelayChunk(from: String, segmentId: String, offset: Int, total: Int, dataB64: String) {}
 
-    override fun onRelayNack(from: String, segmentId: String) {
-        pending[segmentId]?.fail()
-    }
+    override fun onRelayDone(from: String, segmentId: String) {}
+
+    override fun onRelayNack(from: String, segmentId: String) {}
 
     override fun onClosed() {
         Log.w(tag, "signaling closed (will reconnect)")
@@ -348,12 +392,28 @@ class PeerMesh(
                 when (state) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED,
-                    -> refreshPeerCount()
+                    -> {
+                        iceRetries.remove(remoteId)
+                        refreshPeerCount()
+                    }
                     PeerConnection.IceConnectionState.FAILED -> {
-                        // Emulador/NAT: WebRTC cai — mantém peer na sinalização e usa relay WS.
                         peers.remove(remoteId)?.close()
                         refreshPeerCount()
-                        Log.w(tag, "WebRTC failed for $remoteId — using WS relay")
+                        val n = iceRetries.merge(remoteId, 1) { a, _ -> a + 1 } ?: 1
+                        Log.w(tag, "WebRTC ICE FAILED for ${remoteId.take(8)} (try=$n) — confira STUN/TURN")
+                        if (n <= 2 && signaledPeerIds.contains(remoteId) && localPeerId < remoteId) {
+                            executor.execute {
+                                try {
+                                    Thread.sleep(1_500L * n)
+                                } catch (_: InterruptedException) {
+                                    return@execute
+                                }
+                                if (signaledPeerIds.contains(remoteId) && !peers.containsKey(remoteId)) {
+                                    Log.i(tag, "ICE retry connectAsOfferer ${remoteId.take(8)}")
+                                    connectAsOfferer(remoteId)
+                                }
+                            }
+                        }
                     }
                     PeerConnection.IceConnectionState.CLOSED -> {
                         peers.remove(remoteId)
@@ -486,7 +546,12 @@ class PeerMesh(
             )
         }
         return iceServers.map { cfg ->
-            val b = PeerConnection.IceServer.builder(cfg.urls)
+            val urls = cfg.urls
+            val b = if (urls.size == 1) {
+                PeerConnection.IceServer.builder(urls[0])
+            } else {
+                PeerConnection.IceServer.builder(urls)
+            }
             if (!cfg.username.isNullOrBlank()) {
                 b.setUsername(cfg.username).setPassword(cfg.credential ?: "")
             }

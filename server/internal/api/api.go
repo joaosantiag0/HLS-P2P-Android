@@ -7,20 +7,25 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/p2pplayer/server/internal/cache"
 	"github.com/p2pplayer/server/internal/config"
 	"github.com/p2pplayer/server/internal/session"
 	"github.com/p2pplayer/server/internal/signaling"
+	"github.com/p2pplayer/server/web"
 )
 
 type Server struct {
-	cfg      config.Config
-	sessions *session.Manager
-	hub      *signaling.Hub
-	cache    *cache.Store
-	mux      *http.ServeMux
+	cfg       config.Config
+	sessions  *session.Manager
+	hub       *signaling.Hub
+	cache     *cache.Store
+	mux       *http.ServeMux
+	iceMu     sync.Mutex
+	iceCached []iceServer
+	iceUntil  time.Time
 }
 
 func New(cfg config.Config, sessions *session.Manager, hub *signaling.Hub, store *cache.Store) *Server {
@@ -35,6 +40,10 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
+	s.mux.HandleFunc("GET /", s.handleDashboard)
+	s.mux.HandleFunc("GET /api/v1/swarm", s.handleSwarm)
+	s.mux.HandleFunc("GET /ws/dashboard", s.hub.ServeDashboardWS)
 	s.mux.HandleFunc("POST /api/v1/sessions", s.handleCreateSession)
 	s.mux.HandleFunc("GET /hls/{sessionId}/index.m3u8", s.handleManifest)
 	s.mux.HandleFunc("GET /hls/{sessionId}/variant", s.handleVariant)
@@ -42,6 +51,20 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /hls/{sessionId}/u/{urlKey}", s.handleURLSegment)
 	s.mux.HandleFunc("GET /hls/{sessionId}/fetch", s.handleFetch)
 	s.mux.HandleFunc("GET /ws", s.hub.ServeWS)
+}
+
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" && r.URL.Path != "/dashboard" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(web.DashboardHTML)
+}
+
+func (s *Server) handleSwarm(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.hub.Snapshot())
 }
 
 type createBody struct {
@@ -112,21 +135,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		WSURL:       "/ws",
 		ICEServers:  s.iceServers(),
 	})
-}
-
-func (s *Server) iceServers() []iceServer {
-	out := make([]iceServer, 0, 2)
-	if len(s.cfg.STUNURLs) > 0 {
-		out = append(out, iceServer{URLs: s.cfg.STUNURLs})
-	}
-	if s.cfg.TURNURL != "" {
-		out = append(out, iceServer{
-			URLs:       []string{s.cfg.TURNURL},
-			Username:   s.cfg.TURNUser,
-			Credential: s.cfg.TURNPass,
-		})
-	}
-	return out
 }
 
 func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +216,13 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) withAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.AccessSecret == "" || r.URL.Path == "/healthz" {
+		path := r.URL.Path
+		if s.cfg.AccessSecret == "" ||
+			path == "/healthz" ||
+			path == "/" ||
+			path == "/dashboard" ||
+			path == "/api/v1/swarm" ||
+			path == "/ws/dashboard" {
 			next.ServeHTTP(w, r)
 			return
 		}

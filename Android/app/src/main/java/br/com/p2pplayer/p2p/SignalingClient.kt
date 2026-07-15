@@ -44,7 +44,8 @@ class SignalingClient(
     private val listeners = CopyOnWriteArrayList<SignalingListener>()
     // Nunca processar mensagens (nem enviar relay) na thread do OkHttp WebSocket.
     private val dispatch = Executors.newSingleThreadExecutor()
-    private val relaySend = Executors.newSingleThreadExecutor()
+    // Até 2 serves em paralelo — compartilhamento bidirecional no live
+    private val relaySend = Executors.newFixedThreadPool(2)
     private val stopped = AtomicBoolean(false)
     private val connecting = AtomicBoolean(false)
     private val generation = java.util.concurrent.atomic.AtomicInteger(0)

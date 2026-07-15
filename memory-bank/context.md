@@ -14,10 +14,11 @@ MVP funcionando nos 2 emuladores Genymotion (`127.0.0.1:6555` / `:6562`): HTTP +
 - Inventário = 40 IDs mais recentes (url-key `/u/{sha256}`)
 - Live: jitter + espera ~2.5s pelo inventário do peer antes do HTTP
 
-## Correções 2026-07-14
+## Correções 2026-07-14/15
 - WS: dispatch/relay fora da thread OkHttp (evitava `signaling closed`)
 - Go: `offset` sem `omitempty` (crash `JSONException: No value for offset`)
-- Live race: espera + jitter para um peer seedar e o outro puxar via relay
+- Live race: seeder (menor peerId) HTTP + `announceHave`; leecher prefetch P2P
+- Validado ~60s: leecher com HTTP_ts=0 e relayOK contínuo
 
 ## Próximos passos
 - Validar DataChannel em duas TV boxes físicas (NAT/STUN/TURN)

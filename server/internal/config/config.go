@@ -16,15 +16,31 @@ type Config struct {
 	AllowPrivateNet  bool
 	AccessSecret     string
 	STUNURLs         []string
-	TURNURL          string
+	TURNURLs         []string
 	TURNUser         string
 	TURNPass         string
+	MeteredAPIKey    string
+	MeteredAPIURL    string
 	MaxSegmentBytes  int64
 	OriginTimeout    time.Duration
 	PlaylistPollMin  time.Duration
 }
 
 func Load() Config {
+	// TURN público (Open Relay / Metered). Credenciais estáticas legadas;
+	// para cota confiável, defina METERED_API_KEY (conta free em metered.ca).
+	defaultTURN := strings.Join([]string{
+		"turn:openrelay.metered.ca:80",
+		"turn:openrelay.metered.ca:80?transport=tcp",
+		"turn:openrelay.metered.ca:443",
+		"turn:openrelay.metered.ca:443?transport=tcp",
+	}, ",")
+
+	turnCSV := getenv("TURN_URLS", "")
+	if turnCSV == "" {
+		turnCSV = getenv("TURN_URL", defaultTURN)
+	}
+
 	return Config{
 		ListenAddr:      getenv("LISTEN_ADDR", ":8080"),
 		CacheDir:        getenv("CACHE_DIR", "./data/cache"),
@@ -33,10 +49,13 @@ func Load() Config {
 		MaxRedirects:    int(getenvInt64("MAX_REDIRECTS", 5)),
 		AllowPrivateNet: getenv("ALLOW_PRIVATE_NET", "false") == "true",
 		AccessSecret:    getenv("ACCESS_SECRET", ""),
-		STUNURLs:        splitCSV(getenv("STUN_URLS", "stun:stun.l.google.com:19302")),
-		TURNURL:         getenv("TURN_URL", ""),
-		TURNUser:        getenv("TURN_USER", ""),
-		TURNPass:        getenv("TURN_PASS", ""),
+		STUNURLs: splitCSV(getenv("STUN_URLS",
+			"stun:stun.l.google.com:19302,stun:stun.relay.metered.ca:80")),
+		TURNURLs:        splitCSV(turnCSV),
+		TURNUser:        getenv("TURN_USER", "openrelayproject"),
+		TURNPass:        getenv("TURN_PASS", "openrelayproject"),
+		MeteredAPIKey:   getenv("METERED_API_KEY", ""),
+		MeteredAPIURL:   getenv("METERED_API_URL", "https://openrelay.metered.ca/openrelayproject/turn/credentials"),
 		MaxSegmentBytes: getenvInt64("MAX_SEGMENT_BYTES", 32<<20), // 32 MiB
 		OriginTimeout:   getenvDuration("ORIGIN_TIMEOUT", 15*time.Second),
 		PlaylistPollMin: getenvDuration("PLAYLIST_POLL_MIN", 2*time.Second),

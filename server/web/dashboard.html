@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>P2PPlayer — Swarm</title>
+  <style>
+    :root {
+      --bg: #0e1116;
+      --panel: #161b22;
+      --line: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #3fb950;
+      --edge: #58a6ff;
+      --warn: #d29922;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1a2332, var(--bg));
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: baseline;
+      justify-content: space-between;
+      padding: 1.25rem 1.5rem;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--panel) 88%, transparent);
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    h1 span { color: var(--accent); }
+    .meta { color: var(--muted); font-size: 0.85rem; }
+    .stats {
+      display: flex;
+      gap: 1.25rem;
+      flex-wrap: wrap;
+    }
+    .stat strong { color: var(--text); font-size: 1.1rem; }
+    .stat span { display: block; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 0;
+      height: calc(100vh - 74px);
+    }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; height: auto; }
+      #side { border-top: 1px solid var(--line); max-height: 40vh; }
+    }
+    #graph {
+      width: 100%;
+      height: 100%;
+      min-height: 420px;
+      display: block;
+      background:
+        linear-gradient(transparent 23px, color-mix(in srgb, var(--line) 35%, transparent) 24px),
+        linear-gradient(90deg, transparent 23px, color-mix(in srgb, var(--line) 35%, transparent) 24px);
+      background-size: 24px 24px;
+    }
+    #side {
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+      overflow: auto;
+      padding: 1rem;
+    }
+    #side h2 {
+      margin: 0 0 0.75rem;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    .edge-row, .peer-row {
+      padding: 0.65rem 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 0.9rem;
+    }
+    .edge-row .dir { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
+    .edge-row .rate { color: var(--edge); font-weight: 600; }
+    .note {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      line-height: 1.4;
+    }
+    .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      background: var(--warn);
+    }
+    .dot.ok { background: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>P2PPlayer <span>swarm</span></h1>
+      <div class="meta"><span class="dot" id="liveDot"></span><span id="status">conectando…</span></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><strong id="peerCount">0</strong><span>peers</span></div>
+      <div class="stat"><strong id="swarmCount">0</strong><span>swarms</span></div>
+      <div class="stat"><strong id="edgeCount">0</strong><span>fluxos</span></div>
+      <div class="stat"><strong id="rateTotal">0 B/s</strong><span>relay agora</span></div>
+    </div>
+  </header>
+  <main>
+    <canvas id="graph"></canvas>
+    <aside id="side">
+      <h2>Quem → quem</h2>
+      <div id="edges"></div>
+      <h2 style="margin-top:1.25rem">Peers online</h2>
+      <div id="peers"></div>
+      <p class="note" id="note"></p>
+    </aside>
+  </main>
+  <script>
+    const canvas = document.getElementById('graph');
+    const ctx = canvas.getContext('2d');
+    const state = { peers: [], edges: [], nodes: new Map() };
+
+    function fmtBytes(n) {
+      if (!n || n < 0) return '0 B';
+      const u = ['B', 'KB', 'MB', 'GB'];
+      let i = 0; let v = n;
+      while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+      return (i === 0 ? v : v.toFixed(1)) + ' ' + u[i];
+    }
+
+    function short(id) {
+      return (id || '').slice(0, 8);
+    }
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function ensureNodes(peers) {
+      const ids = new Set(peers.map(p => p.id));
+      for (const id of [...state.nodes.keys()]) {
+        if (!ids.has(id)) state.nodes.delete(id);
+      }
+      const w = canvas.clientWidth || 800;
+      const h = canvas.clientHeight || 500;
+      const cx = w / 2, cy = h / 2;
+      const r = Math.min(w, h) * 0.32;
+      peers.forEach((p, i) => {
+        let n = state.nodes.get(p.id);
+        if (!n) {
+          const a = (i / Math.max(peers.length, 1)) * Math.PI * 2 - Math.PI / 2;
+          n = { id: p.id, shortId: p.shortId || short(p.id), x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, vx: 0, vy: 0 };
+          state.nodes.set(p.id, n);
+        } else {
+          n.shortId = p.shortId || short(p.id);
+        }
+      });
+    }
+
+    function simulate() {
+      const nodes = [...state.nodes.values()];
+      const w = canvas.clientWidth || 800;
+      const h = canvas.clientHeight || 500;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j];
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let dist = Math.hypot(dx, dy) || 1;
+          const force = (120 - dist) * 0.02;
+          dx /= dist; dy /= dist;
+          a.vx -= dx * force; a.vy -= dy * force;
+          b.vx += dx * force; b.vy += dy * force;
+        }
+      }
+      for (const e of state.edges) {
+        const a = state.nodes.get(e.from), b = state.nodes.get(e.to);
+        if (!a || !b) continue;
+        let dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const pull = (dist - 180) * 0.005;
+        dx /= dist; dy /= dist;
+        a.vx += dx * pull; a.vy += dy * pull;
+        b.vx -= dx * pull; b.vy -= dy * pull;
+      }
+      for (const n of nodes) {
+        n.vx += (w / 2 - n.x) * 0.002;
+        n.vy += (h / 2 - n.y) * 0.002;
+        n.vx *= 0.85; n.vy *= 0.85;
+        n.x += n.vx; n.y += n.vy;
+        n.x = Math.max(40, Math.min(w - 40, n.x));
+        n.y = Math.max(40, Math.min(h - 40, n.y));
+      }
+    }
+
+    function drawArrow(x1, y1, x2, y2, width, active) {
+      const dx = x2 - x1, dy = y2 - y1;
+      const len = Math.hypot(dx, dy) || 1;
+      const ux = dx / len, uy = dy / len;
+      const start = 28, end = 28;
+      const sx = x1 + ux * start, sy = y1 + uy * start;
+      const ex = x2 - ux * end, ey = y2 - uy * end;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(ex, ey);
+      ctx.strokeStyle = active ? '#58a6ff' : '#30363d';
+      ctx.lineWidth = width;
+      ctx.stroke();
+      const ah = 10 + width;
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - ux * ah - uy * ah * 0.5, ey - uy * ah + ux * ah * 0.5);
+      ctx.lineTo(ex - ux * ah + uy * ah * 0.5, ey - uy * ah - ux * ah * 0.5);
+      ctx.closePath();
+      ctx.fillStyle = active ? '#58a6ff' : '#484f58';
+      ctx.fill();
+    }
+
+    function render() {
+      simulate();
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      ctx.clearRect(0, 0, w, h);
+      const maxRate = Math.max(1, ...state.edges.map(e => e.bytesPerSec || 0));
+      for (const e of state.edges) {
+        const a = state.nodes.get(e.from), b = state.nodes.get(e.to);
+        if (!a || !b) continue;
+        const active = (e.bytesPerSec || 0) > 0;
+        const width = 1.5 + 8 * ((e.bytesPerSec || 0) / maxRate);
+        drawArrow(a.x, a.y, b.x, b.y, width, active);
+        if (active) {
+          const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          ctx.fillStyle = '#8b949e';
+          ctx.font = '12px ui-monospace, monospace';
+          ctx.fillText(fmtBytes(e.bytesPerSec) + '/s', mx + 6, my - 6);
+        }
+      }
+      for (const n of state.nodes.values()) {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, 22, 0, Math.PI * 2);
+        ctx.fillStyle = '#21262d';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#3fb950';
+        ctx.stroke();
+        ctx.fillStyle = '#e6edf3';
+        ctx.font = '600 12px IBM Plex Sans, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(n.shortId, n.x, n.y);
+      }
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+
+    function updateUI(snap) {
+      state.peers = snap.peers || [];
+      state.edges = snap.edges || [];
+      ensureNodes(state.peers);
+      document.getElementById('peerCount').textContent = state.peers.length;
+      document.getElementById('swarmCount').textContent = snap.swarmCount || 0;
+      document.getElementById('edgeCount').textContent = state.edges.length;
+      const rate = state.edges.reduce((s, e) => s + (e.bytesPerSec || 0), 0);
+      document.getElementById('rateTotal').textContent = fmtBytes(rate) + '/s';
+      document.getElementById('note').textContent = snap.note || '';
+
+      const edgesEl = document.getElementById('edges');
+      if (!state.edges.length) {
+        edgesEl.innerHTML = '<div class="edge-row" style="color:var(--muted)">Nenhum fluxo relay ainda. Reproduza em 2+ peers.</div>';
+      } else {
+        edgesEl.innerHTML = state.edges.slice(0, 40).map(e => `
+          <div class="edge-row">
+            <div class="dir">${short(e.from)} → ${short(e.to)}</div>
+            <div><span class="rate">${fmtBytes(e.bytesPerSec)}/s</span>
+              · total ${fmtBytes(e.bytes)} · ${e.transfers || 0} segs
+              ${e.lastSegment ? ' · #' + e.lastSegment : ''}</div>
+          </div>`).join('');
+      }
+      document.getElementById('peers').innerHTML = state.peers.map(p => `
+        <div class="peer-row"><code>${p.shortId || short(p.id)}</code>
+          <div style="color:var(--muted);font-size:0.75rem">${(p.streamKey || '').slice(0, 28)}…</div>
+        </div>`).join('') || '<div class="peer-row" style="color:var(--muted)">Nenhum peer conectado</div>';
+    }
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(proto + '://' + location.host + '/ws/dashboard');
+      const dot = document.getElementById('liveDot');
+      const status = document.getElementById('status');
+      ws.onopen = () => { dot.classList.add('ok'); status.textContent = 'ao vivo'; };
+      ws.onclose = () => {
+        dot.classList.remove('ok');
+        status.textContent = 'desconectado — reconectando…';
+        setTimeout(connect, 1500);
+      };
+      ws.onerror = () => ws.close();
+      ws.onmessage = (ev) => {
+        try { updateUI(JSON.parse(ev.data)); } catch (_) {}
+      };
+    }
+    connect();
+  </script>
+</body>
+</html>

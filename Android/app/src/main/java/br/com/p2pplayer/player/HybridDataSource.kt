@@ -16,13 +16,17 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * DataSource híbrido: segmentos /u/{urlKey} tentam P2P primeiro; fallback HTTP.
+ * DataSource híbrido: store → P2P → HTTP.
+ *
+ * Live com N peers: seeder **por segmento** (hash do id % N) HTTP-baixa e anuncia;
+ * os outros esperam/prefetch via P2P. Com 2 peers ≈ 50% HTTP e 50% P2P em cada lado
+ * (compartilhamento bidirecional).
  */
 class HybridDataSource(
     private val httpClient: OkHttpClient,
     private val store: SegmentStore,
     private val trafficStats: TrafficStats,
-    private val maxParallelP2p: AtomicInteger = AtomicInteger(2),
+    private val maxParallelP2p: AtomicInteger = AtomicInteger(3),
 ) : BaseDataSource(/* isNetwork= */ true) {
 
     private var input: InputStream? = null
@@ -40,26 +44,27 @@ class HybridDataSource(
         if (segmentId != null) {
             data = store.get(segmentId)
             val mesh = PeerMeshHolder.current.get()
-            // Live: os 2 peers pedem o mesmo live edge. Um precisa HTTP-seed e anunciar;
-            // o outro espera o inventário e puxa via relay/WS.
             if (data == null && mesh != null && mesh.hasSignaledPeers()) {
-                if (!mesh.peerHasPublic(segmentId)) {
-                    // Jitter evita os dois caírem no HTTP ao mesmo tempo.
-                    try {
-                        Thread.sleep((150L..700L).random())
-                    } catch (_: InterruptedException) {
-                    }
-                    mesh.awaitPeerSegment(segmentId, timeoutMs = 2500)
+                val iSeed = mesh.isSegmentSeeder(segmentId)
+                // Quem não é dono do segmento espera o seeder anunciar.
+                if (!mesh.peerHasPublic(segmentId) && !iSeed) {
+                    mesh.awaitPeerSegment(segmentId, timeoutMs = 2_800)
                 }
-                if (mesh.peerHasPublic(segmentId) && maxParallelP2p.decrementAndGet() >= 0) {
+                data = store.get(segmentId)
+                if (data == null && mesh.peerHasPublic(segmentId) && maxParallelP2p.decrementAndGet() >= 0) {
                     try {
-                        data = mesh.requestSegment(segmentId, timeoutMs = 6000)
+                        data = mesh.requestSegment(segmentId, timeoutMs = 8_000)
                         fromP2p = data != null
                     } finally {
                         maxParallelP2p.incrementAndGet()
                     }
-                } else if (!mesh.peerHasPublic(segmentId)) {
-                    android.util.Log.d("HybridDS", "P2P skip (peer sem id=${segmentId.take(8)}) → HTTP")
+                } else if (data != null && !iSeed) {
+                    fromP2p = true
+                } else if (!mesh.peerHasPublic(segmentId) && !iSeed) {
+                    android.util.Log.d(
+                        "HybridDS",
+                        "P2P skip seed=${iSeed} id=${segmentId.take(8)} → HTTP",
+                    )
                 }
             }
         }
@@ -68,10 +73,13 @@ class HybridDataSource(
             data = fetchHttp(url)
             if (segmentId != null) {
                 store.putKeyed(segmentId, data)
-                PeerMeshHolder.current.get()?.announceInventory()
+                PeerMeshHolder.current.get()?.announceHave(segmentId)
             }
         } else if (fromP2p) {
             android.util.Log.d("HybridDS", "segment via P2P id=${segmentId?.take(8)} size=${data.size}")
+            if (segmentId != null) {
+                PeerMeshHolder.current.get()?.announceHave(segmentId)
+            }
         }
 
         val offset = dataSpec.position.toInt().coerceAtLeast(0)
@@ -145,7 +153,7 @@ class HybridDataSource(
         private val trafficStats: TrafficStats,
         private val httpClient: OkHttpClient = defaultHttpClient(),
     ) : androidx.media3.datasource.DataSource.Factory {
-        private val parallel = AtomicInteger(2)
+        private val parallel = AtomicInteger(3)
         override fun createDataSource(): HybridDataSource =
             HybridDataSource(httpClient, store, trafficStats, parallel)
     }

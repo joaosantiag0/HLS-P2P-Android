@@ -51,6 +51,38 @@ TURN_USER=p2p TURN_PASS=segredo docker compose --profile turn up --build
 
 Variáveis: `ACCESS_SECRET`, `ALLOW_PRIVATE_NET`, `CACHE_MAX_BYTES`, `STUN_URLS`, `TURN_*`.
 
+## Painel web (swarm)
+
+```
+http://192.168.2.29:8080/dashboard
+```
+
+Peers online ao vivo. O grafo de bytes só mostra fluxos se houver telemetria futura —
+**segmentos P2P vão no DataChannel** e não atravessam o servidor.
+
+## WebRTC: STUN e TURN
+
+Por padrão usa **TURN público Open Relay** (Metered):
+
+- `turn:openrelay.metered.ca` + user/pass `openrelayproject`
+- STUN Google + `stun.relay.metered.ca`
+
+Opcional (mais estável, 20 GB/mês grátis): crie conta em [Open Relay](https://www.metered.ca/tools/openrelay/) e defina:
+
+```bash
+METERED_API_KEY=sua_chave
+```
+
+TURN local (coturn) continua disponível:
+
+```bash
+TURN_URL=turn:192.168.2.29:3478 TURN_USER=p2p TURN_PASS=p2psecret \
+  docker compose --profile turn up -d
+```
+
+Sinalização em `ws://…/ws` (hello/peers/signal/inventory).  
+Segmentos P2P só no **DataChannel**.
+
 ## App Android
 
 1. Abra a pasta `Android/` no Android Studio.
@@ -73,8 +105,8 @@ adb shell am start -n br.com.p2pplayer/.MainActivity \
 
 1. App cria sessão `POST /api/v1/sessions` com URL + UA.
 2. Servidor baixa playlist, escolhe variante, reescreve segmentos como `/hls/{session}/u/{urlKey}.ts`.
-3. Playback: store local → P2P (DataChannel ou relay WS) → HTTP.
-4. Sinalização em `/ws`; swarm por `streamKey` (Xtream sem credenciais, ou `opaque:<hash>`).
+3. Playback: store local → **WebRTC DataChannel** → HTTP.
+4. Sinalização em `/ws`; STUN/TURN via sessão (`iceServers`).
 
 Detalhes: [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
 

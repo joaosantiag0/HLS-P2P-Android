@@ -26,7 +26,7 @@ memory-bank/  Contexto do projeto
 - Go 1.24+
 - Android Studio / JDK 17+ (Gradle 8.13)
 - Docker (opcional)
-- TV box ou emulador com rede real (em Genymotion o WebRTC costuma falhar; o app usa relay WS como fallback)
+- TV box ou emulador com rede real (Genymotion: WebRTC precisa STUN/TURN; DataChannel direto pode falhar sem TURN)
 
 ## Servidor
 
@@ -129,3 +129,87 @@ cd Android && ./gradlew :app:testDebugUnitTest
 - SSRF: só http(s); IPs privados bloqueados por padrão (`ALLOW_PRIVATE_NET`)
 - Credenciais Xtream não entram em `streamKey`/logs de path
 - `ACCESS_SECRET` opcional via header `X-Access-Secret` / query `access=`
+
+## Capacidade: 3000 canais / 2000 clientes
+
+Medição local (Docker, ~2 clientes no JMV ~3 Mbps): processo **~30 MB RAM**, CPU baixa; cache default **2 GB** enche rápido (~1600 segs). O gargalo em escala é **banda + disco de cache**, não CPU do Go.
+
+### Premissas
+
+| Item | Valor usado |
+|------|-------------|
+| Bitrate médio HLS | **3–4 Mbps** (~1,2–1,5 MB / 4 s) |
+| Clientes concurrentes | **2000** |
+| Catálogo | **3000** canais (nem todos ativos ao mesmo tempo) |
+| Papel do server | proxy/cache HLS + sinalização WS (**sem** relay de mídia P2P) |
+| P2P | DataChannel; reduz HTTP no server nos canais com ≥2 peers |
+
+Fórmula egress (pior caso, sem P2P):
+
+```
+egress_Gbps ≈ clientes × bitrate_Mbps / 1000
+           ≈ 2000 × 4 / 1000 = 8 Gbps
+```
+
+### Planilha de banda (egress para clientes)
+
+| Hit HTTP no proxy* | Egress estimado | Ingress origem (ordem) |
+|--------------------|-----------------|-------------------------|
+| 100% (sem P2P / cache frio) | **6–8 Gbps** | ~igual ao egress |
+| 50% (P2P médio nos canais quentes) | **3–5 Gbps** | bem menor (cache + swarm) |
+| 20–30% (P2P forte no top N) | **1,5–3 Gbps** | seed + cauda longa |
+
+\*Fração do tráfego de segmento que ainda sai do server (HTTP). Playlist/sinalização são desprezíveis vs `.ts`.
+
+### Cache em disco (janela live ~60 s)
+
+```
+MB/canal_ativo ≈ (60 / 4) × 1,3 ≈ 20 MB
+```
+
+| Canais ativos simultâneos | Cache útil |
+|---------------------------|------------|
+| 200 | ~4 GB |
+| 500 | ~10–15 GB |
+| 1000 | ~20–30 GB |
+| Margem produção | **100–200 GB** NVMe |
+
+Default `CACHE_MAX_BYTES=2GiB` é só lab — em produção subir para ≥100 GB.
+
+### RAM / CPU
+
+| Recurso | Estimativa 2000 clientes |
+|---------|---------------------------|
+| RAM processo + buffers de `.ts` | **4–8 GB** (pico se muitos `Read` paralelos) |
+| CPU | **4–8 vCPU** (proxy + TLS + rewrite de playlist) |
+| WS (sinalização) | barato frente ao HLS |
+
+### Servidor recomendado
+
+| Perfil | Spec | Link | Cache |
+|--------|------|------|-------|
+| Piloto (≤500 clientes) | 4 vCPU / 8 GB | 1–2 Gbps | 20–50 GB |
+| **Produção 2000 / 3000** | **8 vCPU / 16 GB** | **5–10 Gbps** | **100–200 GB** NVMe |
+| Conservador (P2P fraco) | 16 vCPU / 32 GB | 10 Gbps+ ou 2–3 nós | 200–500 GB |
+
+Exemplos: dedicated 10 Gbps (Hetzner/OVH) costuma sair mais barato que cloud hyperscaler por causa do **egress**.
+
+TURN: Open Relay free **não** aguenta essa escala — Metered pago ou **coturn** próprio (`docker compose --profile turn`).
+
+### Checklist antes de produção
+
+1. `CACHE_MAX_BYTES` ≥ 100 GB e volume em SSD/NVMe  
+2. Subir `MaxIdleConns` / pool HTTP à origem (hoje 32 — insuficiente para milhares de clientes)  
+3. Preferir streaming de segmento (`io.Copy`) em vez de carregar `.ts` inteiro na RAM  
+4. Rate-limit + `ACCESS_SECRET`  
+5. Métricas: egress Gbps, cache hit, sessões, tamanho de swarm por `streamKey`  
+6. 2+ réplicas atrás de LB se um único NIC não cobrir a banda  
+
+### Exemplo rápido (planilha mental)
+
+```
+clientes=2000  bitrate=4Mbps  p2p_offload=50%
+egress ≈ 2000×4×0.50 = 4000 Mbps ≈ 4 Gbps  → link 5–10 Gbps
+canais_ativos≈400 → cache ≈ 400×20MB ≈ 8 GB (+ folga → 100 GB)
+máquina: 8 vCPU / 16 GB RAM / NVMe
+```

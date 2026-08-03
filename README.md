@@ -1,215 +1,214 @@
 # P2PPlayer
 
-Streaming **HLS híbrido** (HTTP + P2P) para TV boxes Android com pouca RAM/CPU.
+**Experimental P2P video streaming distribution** — hybrid HLS playback (HTTP + peer-to-peer) for low-resource Android TV devices.
 
-- **Sem WebView** — Media3/ExoPlayer + WebRTC DataChannel nativos
-- **Sem remux/transcode** — proxy/cache content-addressed dos `.ts` originais
-- **Protocolo próprio** — inspirado no [p2p-media-loader](https://github.com/Novage/p2p-media-loader), sem interoperabilidade obrigatória
+This repository is a **research / proof-of-concept** project. It explores how a central tracker plus WebRTC DataChannels can offload segment delivery between viewers, while keeping a simple HTTP fallback through an HLS proxy.
+
+- **No WebView** — native Media3/ExoPlayer + WebRTC DataChannel
+- **No remux/transcode** — content-addressed proxy/cache of original `.ts` segments
+- **Custom protocol** — inspired by [p2p-media-loader](https://github.com/Novage/p2p-media-loader), not interoperable with it
 
 ```bash
 git clone https://github.com/StgTech/p2p.git
 cd p2p
 ```
 
-## Estrutura
+## Disclaimer
+
+This project is for **technical experimentation only**.
+
+During development and testing, **publicly accessible streams found on the internet** were used as HLS sources (e.g. open `.m3u8` URLs reachable without credentials). **No illegal IPTV, pirated pay-TV, or unauthorized subscription services were used, integrated, or endorsed.**
+
+You are responsible for complying with the terms of service and copyright laws applicable to any URL you test. Do not use this software to redistribute content you do not have the right to distribute.
+
+## Repository layout
 
 ```
-Android/      App TV (Kotlin, Media3, WebRTC)
-server/       Servidor Go (API, proxy HLS, sinalização WS, cache)
-protocol/     Contrato de mensagens e IDs
+Android/      TV app (Kotlin, Media3, WebRTC)
+server/       Go monolith (API, HLS proxy, WS signaling, cache)
+protocol/     Message contracts and ID rules
 deploy/       Docker Compose + Dockerfile
-memory-bank/  Contexto do projeto
+memory-bank/  Project notes
 ```
 
-## Requisitos
+## Requirements
 
 - Go 1.24+
 - Android Studio / JDK 17+ (Gradle 8.13)
-- Docker (opcional)
-- TV box ou emulador com rede real (Genymotion: WebRTC precisa STUN/TURN; DataChannel direto pode falhar sem TURN)
+- Docker (optional)
+- Real network for P2P (emulators often need STUN/TURN for WebRTC)
 
-## Servidor
+## Server
 
 ```bash
 cd server
 go run ./cmd/server
-# escuta :8080
+# listens on :8080
 ```
 
-Ou com Docker:
+Or with Docker:
 
 ```bash
 cd deploy
 docker compose up --build server
 ```
 
-TURN opcional:
+Optional local TURN:
 
 ```bash
-TURN_USER=p2p TURN_PASS=segredo docker compose --profile turn up --build
+TURN_USER=p2p TURN_PASS=secret docker compose --profile turn up -d
 ```
 
-Variáveis: `ACCESS_SECRET`, `ALLOW_PRIVATE_NET`, `CACHE_MAX_BYTES`, `STUN_URLS`, `TURN_*`.
+Useful env vars: `ACCESS_SECRET`, `ALLOW_PRIVATE_NET`, `CACHE_MAX_BYTES`, `STUN_URLS`, `TURN_*`, `METERED_API_KEY`.
 
-## Painel web (swarm)
+## Swarm dashboard
 
 ```
-http://192.168.2.29:8080/dashboard
+http://<server-host>:8080/dashboard
 ```
 
-Peers online ao vivo. O grafo de bytes só mostra fluxos se houver telemetria futura —
-**segmentos P2P vão no DataChannel** e não atravessam o servidor.
+Live view of connected peers. **Video segments travel over WebRTC DataChannels** between clients; they do not pass through the signaling server.
 
-## WebRTC: STUN e TURN
+## WebRTC: STUN and TURN
 
-Por padrão usa **TURN público Open Relay** (Metered):
+Default: **public Open Relay** (Metered) + Google STUN.
 
-- `turn:openrelay.metered.ca` + user/pass `openrelayproject`
-- STUN Google + `stun.relay.metered.ca`
-
-Opcional (mais estável, 20 GB/mês grátis): crie conta em [Open Relay](https://www.metered.ca/tools/openrelay/) e defina:
+For a more reliable free tier (20 GB/month), sign up at [Open Relay](https://www.metered.ca/tools/openrelay/) and set:
 
 ```bash
-METERED_API_KEY=sua_chave
+METERED_API_KEY=your_key
 ```
 
-TURN local (coturn) continua disponível:
+Signaling stays on `ws://…/ws` (hello / peers / signal / inventory).  
+Media P2P uses **DataChannel only**.
 
-```bash
-TURN_URL=turn:192.168.2.29:3478 TURN_USER=p2p TURN_PASS=p2psecret \
-  docker compose --profile turn up -d
-```
+## Android app
 
-Sinalização em `ws://…/ws` (hello/peers/signal/inventory).  
-Segmentos P2P só no **DataChannel**.
+1. Open `Android/` in Android Studio.
+2. Form fields:
+   - **Server URL** — default `http://192.168.2.29:8080` (use `10.0.2.2:8080` on AVD emulator)
+   - **Stream URL** — public HLS `.m3u8` you are allowed to test
+   - **User-Agent** — forwarded to origin via proxy
+3. Overlay shows `HTTP ↓/↑`, `P2P ↓/↑`, and peer count.
 
-## App Android
-
-1. Abra a pasta `Android/` no Android Studio.
-2. No formulário:
-   - **URL do servidor** — padrão `http://192.168.2.29:8080` (na LAN; use `10.0.2.2:8080` só no emulador AVD)
-   - **URL do stream** — HLS (`.m3u8`)
-   - **User-Agent** — enviado à origem via proxy
-3. Overlay: `HTTP ↓/↑`, `P2P ↓/↑` e contagem de peers.
-
-Autoplay via ADB (teste):
+ADB autoplay (testing):
 
 ```bash
 adb shell am start -n br.com.p2pplayer/.MainActivity \
   --es server "http://192.168.2.29:8080" \
-  --es url "https://exemplo.com/playlist.m3u8" \
+  --es url "https://example.com/playlist.m3u8" \
   --ez autoplay true
 ```
 
-## Fluxo
+## Flow
 
-1. App cria sessão `POST /api/v1/sessions` com URL + UA.
-2. Servidor baixa playlist, escolhe variante, reescreve segmentos como `/hls/{session}/u/{urlKey}.ts`.
-3. Playback: store local → **WebRTC DataChannel** → HTTP.
-4. Sinalização em `/ws`; STUN/TURN via sessão (`iceServers`).
+1. App creates session: `POST /api/v1/sessions` with URL + User-Agent.
+2. Server fetches playlist, picks variant, rewrites segments as `/hls/{session}/u/{urlKey}.ts`.
+3. Playback: local store → **WebRTC DataChannel** → HTTP fallback.
+4. Signaling on `/ws`; STUN/TURN from session `iceServers`.
 
-Detalhes: [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
+Details: [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
 
-## Testes
+## Tests
 
 ```bash
 cd server && go test ./...
 cd Android && ./gradlew :app:testDebugUnitTest
 ```
 
-## Limites TV box (MVP)
+## TV box limits (MVP)
 
-- ≤ 3 peers, ≤ 2 transfers P2P paralelas
-- Buffer Media3 curto (~2.5–10 s)
-- Cache local de segmentos ~64 MiB
-- P2P desligado em `onStop` (background)
+- ≤ 3 peers, ≤ 3 parallel P2P transfers
+- Short Media3 buffer (~2.5–10 s)
+- ~64 MiB local segment cache
+- P2P stops in `onStop` (background)
 
-## Segurança
+## Security
 
-- SSRF: só http(s); IPs privados bloqueados por padrão (`ALLOW_PRIVATE_NET`)
-- Credenciais Xtream não entram em `streamKey`/logs de path
-- `ACCESS_SECRET` opcional via header `X-Access-Secret` / query `access=`
+- SSRF: http(s) only; private IPs blocked by default (`ALLOW_PRIVATE_NET`)
+- Credentials are not embedded in `streamKey` / path logs
+- Optional `ACCESS_SECRET` via `X-Access-Secret` header or `access=` query
 
-## Capacidade: 3000 canais / 2000 clientes
+## Capacity planning: 3000 channels / 2000 clients
 
-Medição local (Docker, ~2 clientes no JMV ~3 Mbps): processo **~30 MB RAM**, CPU baixa; cache default **2 GB** enche rápido (~1600 segs). O gargalo em escala é **banda + disco de cache**, não CPU do Go.
+Local measurement (Docker, ~2 clients on a ~3 Mbps public HLS stream): process **~30 MB RAM**, low CPU; default **2 GB** cache fills quickly (~1600 segments). At scale, **bandwidth + disk cache** dominate, not Go CPU.
 
-### Premissas
+### Assumptions
 
-| Item | Valor usado |
-|------|-------------|
-| Bitrate médio HLS | **3–4 Mbps** (~1,2–1,5 MB / 4 s) |
-| Clientes concurrentes | **2000** |
-| Catálogo | **3000** canais (nem todos ativos ao mesmo tempo) |
-| Papel do server | proxy/cache HLS + sinalização WS (**sem** relay de mídia P2P) |
-| P2P | DataChannel; reduz HTTP no server nos canais com ≥2 peers |
+| Item | Value |
+|------|--------|
+| Average HLS bitrate | **3–4 Mbps** (~1.2–1.5 MB / 4 s) |
+| Concurrent clients | **2000** |
+| Catalog | **3000** channels (not all active at once) |
+| Server role | HLS proxy/cache + WS signaling (**no** media relay) |
+| P2P | DataChannel; reduces HTTP on hot swarms (≥2 peers) |
 
-Fórmula egress (pior caso, sem P2P):
+Worst-case egress (no P2P):
 
 ```
-egress_Gbps ≈ clientes × bitrate_Mbps / 1000
+egress_Gbps ≈ clients × bitrate_Mbps / 1000
            ≈ 2000 × 4 / 1000 = 8 Gbps
 ```
 
-### Planilha de banda (egress para clientes)
+### Bandwidth (client egress)
 
-| Hit HTTP no proxy* | Egress estimado | Ingress origem (ordem) |
-|--------------------|-----------------|-------------------------|
-| 100% (sem P2P / cache frio) | **6–8 Gbps** | ~igual ao egress |
-| 50% (P2P médio nos canais quentes) | **3–5 Gbps** | bem menor (cache + swarm) |
-| 20–30% (P2P forte no top N) | **1,5–3 Gbps** | seed + cauda longa |
+| HTTP via proxy* | Estimated egress | Origin ingress (order of) |
+|-----------------|------------------|---------------------------|
+| 100% (no P2P / cold cache) | **6–8 Gbps** | ~same as egress |
+| 50% (moderate P2P on hot channels) | **3–5 Gbps** | much lower |
+| 20–30% (strong P2P on top N) | **1.5–3 Gbps** | seed + long tail |
 
-\*Fração do tráfego de segmento que ainda sai do server (HTTP). Playlist/sinalização são desprezíveis vs `.ts`.
+\*Share of segment traffic still served over HTTP. Playlists/signaling are negligible vs `.ts`.
 
-### Cache em disco (janela live ~60 s)
+### Disk cache (live window ~60 s)
 
 ```
-MB/canal_ativo ≈ (60 / 4) × 1,3 ≈ 20 MB
+MB/active_channel ≈ (60 / 4) × 1.3 ≈ 20 MB
 ```
 
-| Canais ativos simultâneos | Cache útil |
-|---------------------------|------------|
-| 200 | ~4 GB |
-| 500 | ~10–15 GB |
-| 1000 | ~20–30 GB |
-| Margem produção | **100–200 GB** NVMe |
+| Simultaneous active channels | Useful cache |
+|------------------------------|--------------|
+| 200 | ~4 GB |
+| 500 | ~10–15 GB |
+| 1000 | ~20–30 GB |
+| Production headroom | **100–200 GB** NVMe |
 
-Default `CACHE_MAX_BYTES=2GiB` é só lab — em produção subir para ≥100 GB.
+Default `CACHE_MAX_BYTES=2GiB` is lab-only — use ≥100 GB in production.
 
 ### RAM / CPU
 
-| Recurso | Estimativa 2000 clientes |
-|---------|---------------------------|
-| RAM processo + buffers de `.ts` | **4–8 GB** (pico se muitos `Read` paralelos) |
-| CPU | **4–8 vCPU** (proxy + TLS + rewrite de playlist) |
-| WS (sinalização) | barato frente ao HLS |
+| Resource | Estimate @ 2000 clients |
+|----------|-------------------------|
+| RAM + `.ts` buffers | **4–8 GB** |
+| CPU | **4–8 vCPU** |
+| WS signaling | cheap vs HLS |
 
-### Servidor recomendado
+### Recommended server
 
-| Perfil | Spec | Link | Cache |
-|--------|------|------|-------|
-| Piloto (≤500 clientes) | 4 vCPU / 8 GB | 1–2 Gbps | 20–50 GB |
-| **Produção 2000 / 3000** | **8 vCPU / 16 GB** | **5–10 Gbps** | **100–200 GB** NVMe |
-| Conservador (P2P fraco) | 16 vCPU / 32 GB | 10 Gbps+ ou 2–3 nós | 200–500 GB |
+| Profile | Spec | Link | Cache |
+|---------|------|------|-------|
+| Pilot (≤500 clients) | 4 vCPU / 8 GB | 1–2 Gbps | 20–50 GB |
+| **Production 2000 / 3000** | **8 vCPU / 16 GB** | **5–10 Gbps** | **100–200 GB** NVMe |
+| Conservative (weak P2P) | 16 vCPU / 32 GB | 10 Gbps+ or 2–3 nodes | 200–500 GB |
 
-Exemplos: dedicated 10 Gbps (Hetzner/OVH) costuma sair mais barato que cloud hyperscaler por causa do **egress**.
+Dedicated 10 Gbps (Hetzner/OVH) is often cheaper than hyperscaler **egress**.
 
-TURN: Open Relay free **não** aguenta essa escala — Metered pago ou **coturn** próprio (`docker compose --profile turn`).
+TURN: free Open Relay does **not** scale to thousands of clients — use paid Metered or self-hosted **coturn**.
 
-### Checklist antes de produção
+### Pre-production checklist
 
-1. `CACHE_MAX_BYTES` ≥ 100 GB e volume em SSD/NVMe  
-2. Subir `MaxIdleConns` / pool HTTP à origem (hoje 32 — insuficiente para milhares de clientes)  
-3. Preferir streaming de segmento (`io.Copy`) em vez de carregar `.ts` inteiro na RAM  
+1. `CACHE_MAX_BYTES` ≥ 100 GB on SSD/NVMe  
+2. Raise `MaxIdleConns` / origin HTTP pool (32 is too low for thousands of clients)  
+3. Stream segments with `io.Copy` instead of loading full `.ts` into RAM  
 4. Rate-limit + `ACCESS_SECRET`  
-5. Métricas: egress Gbps, cache hit, sessões, tamanho de swarm por `streamKey`  
-6. 2+ réplicas atrás de LB se um único NIC não cobrir a banda  
+5. Metrics: egress Gbps, cache hit, sessions, swarm size per `streamKey`  
+6. 2+ replicas behind a load balancer if one NIC cannot cover bandwidth  
 
-### Exemplo rápido (planilha mental)
+### Quick example
 
 ```
-clientes=2000  bitrate=4Mbps  p2p_offload=50%
-egress ≈ 2000×4×0.50 = 4000 Mbps ≈ 4 Gbps  → link 5–10 Gbps
-canais_ativos≈400 → cache ≈ 400×20MB ≈ 8 GB (+ folga → 100 GB)
-máquina: 8 vCPU / 16 GB RAM / NVMe
+clients=2000  bitrate=4Mbps  p2p_offload=50%
+egress ≈ 2000×4×0.50 = 4000 Mbps ≈ 4 Gbps  → 5–10 Gbps link
+active_channels≈400 → cache ≈ 400×20MB ≈ 8 GB (+ headroom → 100 GB)
+machine: 8 vCPU / 16 GB RAM / NVMe
 ```

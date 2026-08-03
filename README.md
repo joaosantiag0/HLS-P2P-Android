@@ -1,4 +1,4 @@
-# P2PPlayer
+# HLS P2P Streaming Android
 
 **Experimental P2P video streaming distribution** — hybrid HLS playback (HTTP + peer-to-peer) for low-resource Android TV devices.
 

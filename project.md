@@ -1,4 +1,4 @@
-# P2PPlayer
+# HLS P2P Streaming Android
 
 ## Visão geral
 Sistema de streaming live HLS com distribuição híbrida HTTP + P2P para TV boxes Android de baixo recurso.

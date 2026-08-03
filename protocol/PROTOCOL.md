@@ -1,4 +1,4 @@
-# Protocolo P2PPlayer (MVP)
+# HLS P2P Streaming Android — Protocol (MVP)
 
 Protocolo próprio para distribuição híbrida HTTP + P2P de segmentos HLS.
 Não é interoperável com Novage/p2p-media-loader.

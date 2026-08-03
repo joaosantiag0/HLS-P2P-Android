@@ -36,7 +36,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("P2PPlayer server listening on %s", cfg.ListenAddr)
+		log.Printf("HLS P2P Streaming Android server listening on %s", cfg.ListenAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}

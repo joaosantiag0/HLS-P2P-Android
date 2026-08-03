@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "P2PPlayer"
+rootProject.name = "HLS P2P Streaming Android"
 include(":app")
  

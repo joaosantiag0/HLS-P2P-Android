@@ -77,7 +77,7 @@ func SanitizeUserAgent(ua string) string {
 	}, ua)
 	ua = strings.TrimSpace(ua)
 	if ua == "" {
-		return "P2PPlayer/1.0"
+		return "HLS-P2P-Streaming-Android/1.0"
 	}
 	if len(ua) > 256 {
 		return ua[:256]

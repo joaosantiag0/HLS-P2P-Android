@@ -25,7 +25,7 @@ func TestSanitizeUserAgent(t *testing.T) {
 	if ua != "VLC/3.0evil" {
 		t.Fatalf("got %q", ua)
 	}
-	if ssrf.SanitizeUserAgent("") != "P2PPlayer/1.0" {
+	if ssrf.SanitizeUserAgent("") != "HLS-P2P-Streaming-Android/1.0" {
 		t.Fatal("default ua")
 	}
 }
